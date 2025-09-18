@@ -26,3 +26,6 @@ torchrun --standalone --nproc_per_node=4 --master_port=xxxxx \
 train.py --epochs 400 --batch_size batch_size --lr 2e-4 --eval_interval eval_interval --no_fid
 ```
 Note: Remove no_fid, if fid computation is desired.
+
+## Dataset
+The Terra_Aerial_Map dataset will be made public soon.
