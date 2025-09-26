@@ -259,7 +259,6 @@ def main(rank, world_size):
     parser = argparse.ArgumentParser()
     parser.add_argument("--weights", type=str, required=True)
     parser.add_argument("--sat_dir", type=str, required=True)
-    parser.add_argument("--out_dir", type=str, required=True)
     parser.add_argument("--gen_dir", type=str, default=None)
     parser.add_argument("--size", type=int, default=256)
     parser.add_argument("--batch_size", type=int, default=32)
@@ -307,9 +306,9 @@ def main(rank, world_size):
     ds = EvalSrcDataset(args.sat_dir, size=args.size)
 
     # Output + shared cursor
-    gen_dir = args.gen_dir or os.path.join(args.out_dir, f"epoch_{args.epoch_tag}_gen")
-    os.makedirs(args.out_dir, exist_ok=True)
-    cursor_file = os.path.join(args.out_dir, f".cursor_e{args.epoch_tag}.txt")
+    gen_dir = args.gen_dir or f"epoch_{args.epoch_tag}_gen"
+    os.makedirs(gen_dir, exist_ok=True)
+    cursor_file = os.path.join(gen_dir, f".cursor_e{args.epoch_tag}.txt")
 
     # Generate
     generate_all_dynamic(
