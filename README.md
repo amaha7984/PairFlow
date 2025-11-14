@@ -1,8 +1,8 @@
-# Flow Matching for Vector Map Generation from Aerial Imagery
+# Flow Matching Image-to-Image Translation for Map Construction from Aerial Imagery
 PairFlow
 
 <p align="center">
- <img src="./docs/PairFlow_Diagram.png" alt="Preview" width="95%" />
+ <img src="./docs/PairFlow_Diagram_updated.png" alt="Preview" width="95%" />
 </p>
 
 ## Code
