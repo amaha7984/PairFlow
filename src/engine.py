@@ -12,29 +12,30 @@ from datasets import GenericI2IDataset
 import sys
 
 from models.unet import UNetModel #UNET can be used from Lipman et al.
-from flow_matching.path.scheduler.scheduler import CondOTScheduler
-from flow_matching.path.affine import AffineProbPath
-
 from torchvision.utils import save_image
-import random
-from fid_eval_i2i import eval_fid_i2i
 
-from src.utils import setup_ddp, cleanup_ddp
+from fid_eval_i2i import eval_fid_i2i
+from diffusers.models import AutoencoderKL
+
+from src.utils import setup_ddp, cleanup_ddp, gaussian_cosine_path
+
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
 
 
 def main(rank, world_size, args):
     local_rank = setup_ddp(rank, world_size)
 
     # -------- Paths --------
-    DATA_ROOT = "/path/to/data/"
-    SAVE_DIR = "/path/to/save/"
+    DATA_ROOT = "/path/to/data"      
+    SAVE_DIR  = "/path/to/save"      
     os.makedirs(SAVE_DIR, exist_ok=True)
 
     # -------- Data Loading --------
     transform = transforms.Compose([
         transforms.Resize((256, 256)),
         transforms.ToTensor(),
-        transforms.Lambda(lambda x: x * 2.0 - 1.0),  # NEW: [-1, 1]
+        transforms.Lambda(lambda x: x * 2.0 - 1.0),  # [-1, 1] expected by SD-VAE
     ])
 
     dataset = GenericI2IDataset(DATA_ROOT, transform=transform)
@@ -44,11 +45,13 @@ def main(rank, world_size, args):
         batch_size=args.batch_size,
         sampler=sampler,
         num_workers=args.num_workers,
-        pin_memory=True, 
-        drop_last=True
+        pin_memory=True,
+        drop_last=True,
     )
 
-    # -------- Model Setup --------
+    # -------- Model Setup (latent-space I/O) --------
+    # Latent z has 4 channels; concat z_t (4) with z_src (4) -> in_channels = 8
+    # Predict latent velocity u (4) -> out_channels = 4
     model = UNetModel(
         in_channels=8,
         model_channels=192,
@@ -69,15 +72,24 @@ def main(rank, world_size, args):
 
     model = DDP(model, device_ids=[local_rank], output_device=local_rank)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=0.0)
-    lr_sched  = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=args.lr,
+        betas=(0.9, 0.999),
+        weight_decay=0.0,
+    )
+    lr_sched = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
-    scheduler = CondOTScheduler()
-    path = AffineProbPath(scheduler)
+    # -------- VAE (frozen) --------
+    vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to(local_rank)
+    vae.eval()
+    vae.train = False
+    for p in vae.parameters():
+        p.requires_grad = False
+    scale_factor = args.scale_factor  # 0.18215 default
 
+    # -------- Loss & AMP --------
     criterion = nn.MSELoss()
-
-    # -------- Training Loop --------
     scaler = torch.cuda.amp.GradScaler()
 
     for epoch in range(args.epochs):
@@ -85,25 +97,37 @@ def main(rank, world_size, args):
         model.train()
         total_loss = 0.0
 
-        pbar = tqdm(dataloader, desc=f"[GPU {local_rank}] Epoch {epoch+1}", disable=rank != 0)
+        pbar = tqdm(
+            dataloader,
+            desc=f"[GPU {local_rank}] Epoch {epoch + 1}",
+            disable=rank != 0,
+        )
 
         for batch in pbar:
+            # Target (map) and source (sat) in [-1,1]
             x1 = batch["map"].to(local_rank, non_blocking=True)  # target
-            x0 = batch["sat"].to(local_rank, non_blocking=True)  # source(conditioning)
-            noise = torch.randn_like(x0)
-            B = x0.shape[0]
-            t = torch.rand(B, device=local_rank)
-            path_sample = path.sample(t=t, x_0=noise, x_1=x1)
-            x_t = path_sample.x_t      # = (1-t)*noise + t*x1 for CondOT
-            u_t = path_sample.dx_t     # = (-1)*noise + (1)*x1 for CondOT
+            x0 = batch["sat"].to(local_rank, non_blocking=True)  # source (conditioning)
 
-            # Condition by concatenating source image
-            x_input = torch.cat([x_t, x0], dim=1)
+            B = x0.shape[0]
+            t = torch.rand(B, device=local_rank)       # (B,)
+            t_b = t.view(B, 1, 1, 1)                   # broadcast for mixing
+
+            # Encode to latent space 
+            with torch.no_grad():
+                z0    = vae.encode(x1).latent_dist.sample() * scale_factor  # (B,4,32,32)
+                z_src = vae.encode(x0).latent_dist.sample() * scale_factor  # (B,4,32,32)
+                z1    = torch.randn_like(z0)
+
+                # ---- Cosine-schedule Gaussian FM path ----
+                z_t, u = gaussian_cosine_path(z0, z1, t_b, s=0.008, eps=1e-5)
+
+            # Condition by concatenating source latent
+            x_input = torch.cat([z_t, z_src], dim=1)  # (B,8,32,32)
 
             optimizer.zero_grad(set_to_none=True)
             with torch.cuda.amp.autocast():
-                pred = model(x_input, t, extra={})
-                loss = (pred - u_t).pow(2).mean()
+                pred = model(x_input, t, extra={})    # (B,4,32,32)
+                loss = criterion(pred, u)
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -117,32 +141,37 @@ def main(rank, world_size, args):
 
         # -------- End of epoch --------
         torch.cuda.synchronize()
-        dist.barrier()  # <-- making ALL ranks arrive here together
+        dist.barrier()  # ALL ranks sync
 
         avg_loss = total_loss / len(dataloader)
         if rank == 0:
-            print(f"[Epoch {epoch+1}] Loss: {avg_loss:.4f}")
+            print(f"[Epoch {epoch + 1}] Loss: {avg_loss:.4f}")
 
-        # Eval interval: running FID on ALL ranks (distributed)
+        # -------- Eval / Save --------
         if (epoch + 1) % args.eval_interval == 0:
             if args.no_fid:
-                # saving the checkpoint, no FID pass
+                # Saving checkpoint, no FID pass
                 if rank == 0:
-                    ckpt_path = os.path.join(SAVE_DIR, f"model_epoch{epoch+1}.pth")
+                    ckpt_path = os.path.join(SAVE_DIR, f"model_epoch{epoch + 1}.pth")
                     torch.save(model.module.state_dict(), ckpt_path)
-                    print(f"[Epoch {epoch+1}] Saved checkpoint (no FID).")
-                dist.barrier()  
+                    print(f"[Epoch {epoch + 1}] Saved checkpoint (no FID).")
+                dist.barrier()
             else:
-                # === existing FID code unchanged ===
-                sat_dir = "/path/to/test/aerial"
-                map_dir = "/path/to/test/map"
+                sat_dir = "/path/to/testA"   # (satellite)
+                map_dir = "/path/to/testB"   # (map)
 
-                fid_val = eval_fid_i2i(
-                    model.module, device=local_rank,
-                    sat_dir=sat_dir, map_dir=map_dir,
-                    out_dir=SAVE_DIR, epoch=epoch+1,
-                    steps=50, batch_size=32, num_workers=args.num_workers,
-                    save_samples=10
+                fid_val = eval_fid_i2i_gaussian_cosine(
+                    model.module,
+                    device=local_rank,
+                    sat_dir=sat_dir,
+                    map_dir=map_dir,
+                    out_dir=SAVE_DIR,
+                    epoch=epoch + 1,
+                    steps=50,
+                    batch_size=32,
+                    num_workers=args.num_workers,
+                    save_samples=10,
+                    scale_factor=scale_factor,
                 )
 
                 torch.cuda.synchronize()
@@ -150,8 +179,8 @@ def main(rank, world_size, args):
                 torch.cuda.ipc_collect()
 
                 if rank == 0:
-                    print(f"[Epoch {epoch+1}] FID: {fid_val:.6f}")
-                    ckpt_path = os.path.join(SAVE_DIR, f"model_epoch{epoch+1}.pth")
+                    print(f"[Epoch {epoch + 1}] FID: {fid_val:.6f}")
+                    ckpt_path = os.path.join(SAVE_DIR, f"model_epoch{epoch + 1}.pth")
                     torch.save(model.module.state_dict(), ckpt_path)
 
                     if not hasattr(main, "_best_fid"):
@@ -160,9 +189,10 @@ def main(rank, world_size, args):
                         main._best_fid = fid_val
                         best_path = os.path.join(SAVE_DIR, "model_best_fid.pth")
                         torch.save(model.module.state_dict(), best_path)
-                        print(f"[Epoch {epoch+1}] New best FID ({fid_val:.6f}). Saved: {best_path}")
+                        print(f"[Epoch {epoch + 1}] New best FID ({fid_val:.6f}). Saved: {best_path}")
 
                 dist.barrier()
 
         lr_sched.step()
+
     cleanup_ddp()
