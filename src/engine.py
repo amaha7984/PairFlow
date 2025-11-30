@@ -14,7 +14,7 @@ import sys
 from models.unet import UNetModel #UNET can be used from Lipman et al.
 from torchvision.utils import save_image
 
-from fid_eval_i2i import eval_fid_i2i
+from fid_eval_i2i import eval_fid_i2i_gaussian_cosine
 from diffusers.models import AutoencoderKL
 
 from src.utils import setup_ddp, cleanup_ddp, gaussian_cosine_path
