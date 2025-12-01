@@ -17,7 +17,8 @@ from torchvision.utils import save_image
 from fid_eval_i2i import eval_fid_i2i_gaussian_cosine
 from diffusers.models import AutoencoderKL
 
-from src.utils import setup_ddp, cleanup_ddp, gaussian_cosine_path
+from src.utils.dist import setup_ddp, cleanup_ddp
+from src.utils.paths import gaussian_cosine_path
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
