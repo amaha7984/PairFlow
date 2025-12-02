@@ -17,7 +17,11 @@ from models.unet import UNetModel
 from diffusers.models import AutoencoderKL
 
 from src.utils.dist import setup_ddp, cleanup_ddp
-from fid_eval_i2i import _rk4_generate_latent_gaussian_cosine, _pm1_to_01
+from src.utils.sampling import (
+    _rk4_generate_latent_gaussian_cosine,
+    _pm1_to_01
+)
+
 
 
 # =========================================================
