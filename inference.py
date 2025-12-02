@@ -7,8 +7,7 @@ from torchvision import transforms as T
 from torchvision.utils import save_image
 from PIL import Image
 from tqdm import tqdm
-from datetime import timedelta
-
+from datetime import timedelta 
 
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -17,9 +16,13 @@ from models.unet import UNetModel
 # SD VAE for latent encode/decode
 from diffusers.models import AutoencoderKL
 
-# ---------------------------
-# Dataset: source-only, sat images with *_A
-# ---------------------------
+from src.utils.dist import setup_ddp, cleanup_ddp
+from fid_eval_i2i import _rk4_generate_latent_gaussian_cosine, _pm1_to_01
+
+
+# =========================================================
+# Dataset: source-only (satellite) images with *_A
+# =========================================================
 class EvalSrcDataset(Dataset):
     def __init__(self, sat_dir: str, size: int = 256):
         self.sat_dir = sat_dir
@@ -46,12 +49,8 @@ class EvalSrcDataset(Dataset):
         return {"sat_pm1": self.to_src(x0), "name": n}
 
 
-def _pm1_to_01(x: torch.Tensor) -> torch.Tensor:
-    return (x.clamp(-1, 1) + 1.0) / 2.0
-
-
 # =========================================================
-# Robust weight loader
+# weight loader
 # =========================================================
 def load_state_dict_strict(model: torch.nn.Module, ckpt_path: str, device: torch.device):
     ckpt = torch.load(ckpt_path, map_location=device)
@@ -68,28 +67,7 @@ def load_state_dict_strict(model: torch.nn.Module, ckpt_path: str, device: torch
 
 
 # =========================================================
-# DDP helpers
-# =========================================================
-def setup_ddp(rank, world_size):
-    local_rank = int(os.environ.get("LOCAL_RANK", rank))
-    torch.cuda.set_device(local_rank)
-    dist.init_process_group(
-        backend="nccl",
-        init_method="env://",
-        rank=rank,
-        world_size=world_size,
-        timeout=timedelta(hours=2),
-    )
-    return local_rank
-
-
-def cleanup_ddp():
-    if dist.is_available() and dist.is_initialized():
-        dist.destroy_process_group()
-
-
-# =========================================================
-# Global progress helpers
+# Global progress helpers (shared across ranks via files)
 # =========================================================
 def _add_done(done_file: str, inc: int) -> int:
     with open(done_file, "a+b") as f:
@@ -125,43 +103,6 @@ def _claim_next_chunk(cursor_file: str, chunk_size: int, n_total: int):
         f.flush()
         fcntl.flock(f, fcntl.LOCK_UN)
     return (start, end)
-
-
-# =========================================================
-# Cosine-schedule Gaussian FM RK4 sampler
-# (matches fid_eval_i2i_gaussian_cosine.py)
-# =========================================================
-@torch.no_grad()
-def _rk4_generate_latent_gaussian_cosine(
-    model: torch.nn.Module,
-    z_src: torch.Tensor,
-    steps: int = 50,
-) -> torch.Tensor:
-    """
-    Cosine-schedule Gaussian FM sampling:
-    integrate reverse-time ODE from t=1 (noise) -> t=0 (data).
-
-    This matches the sampler used in fid_eval_i2i_gaussian_cosine.py.
-    """
-    device = z_src.device
-    z = torch.randn_like(z_src)  # start from noise at t=1
-    ts = torch.linspace(1.0, 0.0, steps + 1, device=device)
-
-    def f_scalar(t_s: float, z_s: torch.Tensor):
-        tb = torch.full((z_s.size(0),), t_s, device=device, dtype=z_s.dtype)
-        zin = torch.cat([z_s, z_src], dim=1)  # [z_t, z_src]
-        return model(zin, tb, extra={})      # velocity v_theta
-
-    for i in range(steps):
-        t0, t1 = ts[i].item(), ts[i + 1].item()
-        h = t1 - t0  # negative step
-        k1 = f_scalar(t0,         z)
-        k2 = f_scalar(t0 + 0.5*h, z + 0.5*h*k1)
-        k3 = f_scalar(t0 + 0.5*h, z + 0.5*h*k2)
-        k4 = f_scalar(t1,         z + h*k3)
-        z  = z + (h / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
-
-    return z
 
 
 # =========================================================
@@ -284,10 +225,10 @@ def main(rank, world_size):
     parser.add_argument("--out_dir", type=str, required=True,
                         help="Directory for logs/cursor files")
     parser.add_argument("--gen_dir", type=str, default=None,
-                        help="Directory to save generated images "
-                             "(default: out_dir/epoch_<tag>_gen_latent_gfm_cosine)")
+                        help=("Directory to save generated images "
+                              "(default: out_dir/epoch_<tag>_gen_latent_gfm_cosine)"))
     parser.add_argument("--size", type=int, default=256)
-    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--batch_size", type[int], default=32)
     parser.add_argument("--chunk_size", type=int, default=256)
     parser.add_argument("--epoch_tag", type=int, default=0)
     parser.add_argument("--nfe", type=int, default=50,
@@ -299,7 +240,7 @@ def main(rank, world_size):
     local_rank = setup_ddp(rank, world_size)
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
 
-    # -------- Latent UNet model (must match train_latent_gaussian_cosine.py) --------
+
     model = UNetModel(
         in_channels=8,         # [z_t (4) + z_src (4)]
         model_channels=192,
