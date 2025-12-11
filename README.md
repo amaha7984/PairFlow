@@ -1,4 +1,5 @@
-# Flow Matching Image-to-Image Translation for Map Construction from Aerial Imagery
+# Flow Matching for Map Generation from Aerial Imagery
+Flow Matching Image-to-Image Translation for Map Construction from Aerial Imagery
 PairFlow
 
 <p align="center">
