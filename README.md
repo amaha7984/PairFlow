@@ -1,18 +1,17 @@
-# Flow Matching for Map Generation from Aerial Imagery
-Flow Matching Image-to-Image Translation for Map Construction from Aerial Imagery
-PairFlow
+# PairFlow: Efficient Flow Matching for Paired Image-to-Image Translation with Perceptual and Structural Fidelity
+
 
 <p align="center">
  <img src="./docs/PairFlow_Diagram_updated.png" alt="Preview" width="95%" />
 </p>
 
 ## Code
-Official implementation of the paper: "Flow Matching for Vector Map Generation from Aerial Imagery"
+Official implementation of the paper: "PairFlow: Efficient Flow Matching for Paired Image-to-Image Translation with Perceptual and Structural Fidelity"
 
 ## Installation
 - Clone the repository:
    ```bash
-   git clone https://github.com/xxxxx/PairFlow.git
+   git clone https://github.com/amaha7984/PairFlow.git
    cd PairFlow
    ```
 - Create a Python virtual environment (optional)
