@@ -42,3 +42,16 @@ CUDA_VISIBLE_DEVICES=1,2,3,4 torchrun --standalone --nproc_per_node=4 --master_p
 
 ## Dataset
 The Terra_Aerial_Map dataset will be made public soon.
+
+### Citation
+
+If you find this repository useful for your research, please consider citing our work:
+
+```bibtex
+@InProceedings{Mahara_2026_CVPRW,
+    author    = {Mahara, Arpan and Rishe, Naphtali},
+    title     = {PairFlow: Efficient Flow Matching for Paired Image-to-Image Translation with Perceptual and Structural Fidelity},
+    booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) Workshops},
+    year      = {2026},
+    note      = {In press}
+}
